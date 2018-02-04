@@ -13,12 +13,23 @@ class ClientHelloSpec extends FlatSpec with Matchers {
 
   "Messages.ClientHello::produce" should "take something from kalium's keys, and ::getClientEphemeralKey should decode it, if it has the same networkKey" in {
 
-    val arr: Array[Byte] = Messages.ClientHello.produce(clientPk, networkKey)
+    println("client pk", clientPk)
+
+    val arr: Array[Byte] = Messages.ClientHello.produce(
+      clientPk,
+      networkKey
+    )
     arr.size shouldBe 64
+    arr.slice(32, 64) shouldBe clientPk
 
     val clientEph: Option[Array[Byte]] =
-      Messages.ClientHello.getClientEphemeralKey(arr, networkKey)
+      Messages.ClientHello.getClientEphemeralKey(
+        arr,
+        networkKey
+      )
 
-    clientEph shouldBe clientPk
+    (clientEph.get.sameElements(clientPk)) shouldBe true
   }
+
+  // TODO should return None with diff network keys
 }
