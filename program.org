@@ -1,0 +1,78 @@
+#+Title: scuttlebutt-scala
+
+* Introduction
+
+You will want libsodium:
+
+On OSX:
+
+#+BEGIN_SRC 
+brew install libsodium
+#+END_SRC
+
+TODO ubuntu/debian instructions
+TODO arch instructions
+
+* Handshake
+
+The scuttlebutt protocol begins with a handhsake between a Client and a Server
+
+We can describe the handshake at a high-level:
+
+#+BEGIN_SRC scala
+import scuttlebutt.handshake.{Client, Server}
+import scuttelbutt.handshake.messages.{ClientHello, ServerHello, ClientAccept, ServerAccept}
+
+val HandshakeProtocol: Future[SharedSecret] = Protocol(
+  Vector(
+    (Client->Server)->ClientHello,
+    (Server->Client)->ServerHello,
+    (Client->Server)->ClientAccept,
+    // Server will hang up after sending this last message.
+    // Client will hang up after receiving it.
+    (Server->Client)->ServerAccept,
+  )
+)
+#+END_SRC
+
+** Protocol
+
+To make this work, I first built a generic =Protocol=, modeled as messages
+between participants.
+
+#+BEGIN_SRC scala
+// TODO
+#+END_SRC
+
+** Handshake steps
+
+Now, each step in the handshake can be represented by a Message.
+
+First, the client sends a ClientHello.
+
+The server responds with a ServerHello.
+
+The client responds with a ClientAccept.
+
+The server replies with a ServerAccept.
+
+* Box stream
+
+_TODO Messages are passed by Participants over a Channel, but we distinguish
+between Hangup and HangupBecauseGoodbye_
+
+_TODO hangup works by (sendAndHangup (new Goodbye))_
+
+* RPC protocol
+
+_TODO RPC protocol takes two BoxStreams_
+
+* Feeds
+
+* Blobs
+
+* Following
+
+* Pubs
+
+* Private messages

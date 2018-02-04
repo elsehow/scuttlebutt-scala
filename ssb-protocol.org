@@ -1,0 +1,759 @@
+#+title: Secure scuttlebutt protocol
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="./style1.css" />
+
+Scuttlebutt is a protocol for building decentralized applications that work well
+offline and that no one person can control. Because there is no central server,
+Scuttlebutt clients connect to their peers to exchange information. +This guide
+describes+ _This program implements_ the protocols used to communicate within
+the Scuttlebutt network _in scala_.
+* Keys and identities
+
+The first thing a user needs to participate in Scuttlebutt is an identity. An
+identity is an Ed25519 key pair and typically represents a person, a device, a
+server or a bot. It’s normal for a person to have several Scuttlebutt
+identities.
+
+Because identities are long and random, no coordination or permission is
+required to create a new one, which is essential to the network’s design.
+
+Later, a user can choose to give themselves a nickname or avatar to make
+themselves easier to refer to. Over time nicknames may change but identities
+stay the same. If a user loses their secret key or has it stolen they will need
+to generate a new identity and tell people to use their new one instead.
+
+The public key of an identity is presented to users and transmitted in some
+parts of the network protocol using this format:
+
+#+BEGIN_SRC 
+@FCX/tsDLpubCPKKfIrw4gc+SQkHcaD17s7GI6i/ziWY=.ed25519
+#+END_SRC
+
+Begin with an =@= sign, then base64 encode the public key (with the base64
+variant that uses =+= and =/=, the final padding === is also required). Finally put
+=.ed25519= on the end.
+
+Each identity has an associated feed, which is a list of all the messages posted by that identity. This is why the identity is also called a feed ID.
+
+#+BEGIN_SRC scala
+// TODO Identity.scala
+// TODO define an Identity 
+// TODO define a publicKey: String method that follows output rules
+// TODO define a way to update nick and avatar (to strings, for now)
+#+END_SRC
+
+Upon starting for the first time, Scuttlebutt clients will automatically
+generate an Ed25519 key pair and save it in the user’s home folder under
+=.ssb/secret=.
+
+#+BEGIN_SRC scala
+// TODO Scuttlebutt.scala
+// TODO method to generate an identity, if none exists in .ssb/secret
+#+END_SRC
+* Discovery
+
+After a user has generated their identity they need to find some peers to
+connect to. To connect to a peer you need to know its IP address, port number
+and public key. The Scuttlebutt protocol currently has three methods for peers
+to discover each other. 
+
+** Local network
+
+Peers constantly broadcast UDP packets on their local network advertising their
+presence. The body of each packet is a string containing the peer’s IP address,
+port and base64-encoded public key (without =@= or =.ed25519=): 
+
+#+BEGIN_SRC 
+net:192.168.1.123:8008~shs:FCX/tsDLpubCPKKfIrw4gc+SQkHcaD17s7GI6i/ziWY=
+#+END_SRC
+
+_...means..._
+
+| Source IP        |    92.168.1.123 |
+| Source port      |            8008 |
+| Destination IP   | 255.255.255.255 |
+| Destination port |            8008 |
+
+UDP source and destination ports are set to the same port number that the peer
+is listening on TCP for peer connections (normally 8008).
+
+Current implementations broadcast one of these packets every second. When a peer sees another peer’s broadcast packet they can connect to exchange messages. Some clients show nearby peers in the user interface so that the user can see other people on the same network as them.
+
+** Invite code
+
+[[invites][Invite codes]] help new users get connected to their first [[pubs][pub]] which is a
+Scuttlebutt peer that is publicly accessible over the internet. An invite code
+contains a pub’s domain name, port and public key.
+
+They also contain a secret key that the user can [[reedeming-invites][redeem]] to make the pub [[following][follow]]
+them back. This lets the new user see messages posted by other members of the
+pub and share their own messages. Invite codes are the most common way for new
+users to get started on Scuttlebutt.
+
+Pub operators can distribute invite codes any way they see fit, for example by
+posting them on existing social networks. Some pubs have a web page that anybody
+can visit to generate an invite code.
+
+** Pub message
+
+Users can post a message to their own feed advertising a pub:
+
+#+caption: Here the user =@FCX/ts…= is advertising that they know of pub =@VJM7w1…= along with the pub’s domain name and port.
+#+BEGIN_SRC 
+{
+  "author": "@FCX/tsDLpubCPKKfIrw4gc+SQkHcaD17s7GI6i/ziWY=.ed25519",
+  "content": {
+    "type": "pub",
+    "address": {
+      "host": "one.butt.nz",
+      "port": 8008,
+      "key": "@VJM7w1W19ZsKmG2KnfaoKIM66BRoreEkzaVm/J//wl8=.ed25519"
+    }
+  },
+  …
+}
+#+END_SRC
+
+#+BEGIN_SRC scala
+// TODO post PubAdvertisementMessage
+/// TODO make sure it can serialize to json
+#+END_SRC
+
+When others see this message they can make a note that this pub exists and
+connect to it in the future.
+
+Pub messages are a useful way to find additional peers if you already know a
+few. Obviously this doesn’t work for new users who don’t know anyone else yet
+and therefore can’t see any pub messages.
+
+* Peer connections
+
+Once a Scuttlebutt client has discovered the IP address, port number and public
+key of a peer they can connect via TCP to ask for updates and exchange messages.
+
+** Handshsake
+
+The connection begins with a 4-step handshake to authenticate each peer and set up an encrypted channel.
+
+The handshake uses the [[https://dominictarr.github.io/secret-handshake-paper/shs.pdf][Secret Handshake key exchange]] which is designed to have these security properties:
+
+- After a successful handshake the peers have verified each other’s public keys.
+- The handshake produces a shared secret that can be used with a bulk encryption
+  cypher for exchanging further messages.
+- The client must know the server’s public key before connecting. The server
+  learns the client’s public key during the handshake.
+- Once the client has proven their identity the server can decide they don’t
+  want to talk to this client and disconnect without confirming their own
+  identity.
+- A man-in-the-middle cannot learn the public key of either peer.
+- Both peers need to know a key that represents the particular Scuttlebutt
+  network they wish to connect to, however a man-in-the-middle can’t learn this
+  key from the handshake. If the handshake succeeds then both ends have
+  confirmed that they wish to use the same network.
+- Past handshakes cannot be replayed. Attempting to replay a handshake will not
+  allow an attacker to discover or confirm guesses about the participants’
+  public keys.
+- Handshakes provide forward secrecy. Recording a user’s network traffic and
+  then later stealing their secret key will not allow an attacker to decrypt
+  their past handshakes.
+
+*** Starting keys
+
+Upon starting the handshake, the client and server know these keys:
+
+_Client knows the server's long-term publci key from discovery._
+
+_Client and server both know a well known "network key" or "app key"._
+
+_Client and server both knkow their own long-term identity keys, and their ephemeral keypairs for the handshake_.
+
+
+[[./figures/starting_keys.svg]]
+
+*** 1. Client hello
+
+Client sends (64 byes)
+
+#+BEGIN_SRC 
+concat(
+  nacl_auth(
+    msg: client_ephemeral_pk,
+    key: network_identifier
+  ),
+  client_ephemeral_pk
+)
+#+END_SRC
+
+Server verifies
+#+BEGIN_SRC 
+assert(length(msg1) == 64)
+
+client_hmac = first_32_bytes(msg1)
+client_ephemeral_pk = last_32_bytes(msg1)
+
+assert_nacl_auth_verify(
+  authenticator: client_hmac,
+  msg: client_ephemeral_pk,
+  key: network_identifier
+)
+#+END_SRC
+
+
+
+#+BEGIN_QUOTE
+
+*hmac* is a function that allows verifying that a message came from someone who
+knows the secret key. In this case the network identifier is used as the secret
+key.
+
+Both the message creator and verifier have to know the same message and secret
+key for the verification to succeed, but the secret key is not revealed to an
+eavesdropper.
+
+Throughout the protocol, all instances of hmac use HMAC-SHA-512-256.
+
+#+END_QUOTE
+
+
+First the client sends their =a= generated ephemeral key. Also included is an
+hmac that indicates the client wishes to use their key with this specific
+instance of the Scuttlebutt network.
+
+The =N=  network identifier is a fixed 32-byte key. On the main Scuttlebutt network
+it is:
+
+#+BEGIN_SRC 
+d4a1cb88a66f02f8db635ce26441cc5dac1b08420ceaac230839b755845a9ffb
+#+END_SRC
+
+Changing the key allows separate networks to be created, for example private
+networks or testnets. An eavesdropper cannot extract the network identifier
+directly from what is sent over the wire, although they could confirm a guess
+that it is the main Scuttlebutt network because that identifier is publicly
+known.
+
+The server stores the client’s ephemeral public key and uses the hmac to verify
+that the client is using the same network identifier.
+
+*** 2. Server hello
+
+Server sends (64 bytes)
+
+#+BEGIN_SRC 
+concat(
+  nacl_auth(
+    msg: server_ephemeral_pk,
+    key: network_identifier
+  ),
+  server_ephemeral_pk
+)
+#+END_SRC
+
+Client verifies
+
+#+BEGIN_SRC 
+assert(length(msg2) == 64)
+
+server_hmac = first_32_bytes(msg2)
+server_ephemeral_pk = last_32_bytes(msg2)
+
+assert_nacl_auth_verify(
+  authenticator: server_hmac,
+  msg: server_ephemeral_pk,
+  key: network_identifier
+)
+#+END_SRC
+
+The server responds with their own  ephemeral public key =b= and hmac. The client
+stores the key and verifies that they are also using the same network
+identifier.
+
+*** Shared secret derivation
+
+Client computes:
+
+#+BEGIN_SRC 
+shared_secret_ab = nacl_scalarmult(
+  client_ephemeral_sk,
+  server_ephemeral_pk
+)
+
+shared_secret_aB = nacl_scalarmult(
+  client_ephemeral_sk,
+  pk_to_curve25519(server_longterm_pk)
+)
+#+END_SRC
+
+Server computes:
+
+#+BEGIN_SRC 
+shared_secret_ab = nacl_scalarmult(
+  server_ephemeral_sk,
+  client_ephemeral_pk
+)
+
+shared_secret_aB = nacl_scalarmult(
+  sk_to_curve25519(server_longterm_sk),
+  client_ephemeral_pk
+)
+#+END_SRC
+
+
+
+#+BEGIN_QUOTE
+*Scalar multiplication* is a function for deriving shared secrets from a pair of
+secret and public Curve25519 keys.
+
+The order of arguments matters. In the NaCl API the secret key is provided
+first.
+
+Note that long term keys are Ed25519 and must first be converted to Curve25519.
+#+END_QUOTE
+
+
+Now that ephemeral keys have been exchanged, both ends use them to derive a
+shared secret =a*b= using scalar multiplication.
+
+The client and server each combine their own ephemeral secret key with the
+other’s ephemeral public key to produce the same shared secret on both ends. An
+eavesdropper doesn’t know either secret key so they can’t generate the shared
+secret. A man-in-the-middle could swap out the ephemeral keys in Messages 1 and
+2 for their own keys, so the shared secret =a*b= alone is not enough for the client
+and server to know that they are talking to each other and not a
+man-in-the-middle.
+
+Because the client already knows the server’s long term public key =B=, both ends
+derive a second secret =a*B= that will allow the client to send a message that only
+the real server can read and not a man-in-the-middle.
+
+*** 3. Cilent accept
+
+Client computes:
+
+#+BEGIN_SRC 
+detached_signature_A = nacl_sign_detached(
+  msg: concat(
+    network_identifier,
+    server_longterm_pk,
+    sha256(shared_secret_ab)
+  ),
+  key: client_longterm_sk
+)
+#+END_SRC
+
+then sends (112 bytes)
+
+#+BEGIN_SRC 
+nacl_secret_box(
+  msg: concat(
+    detached_signature_A,
+    client_longterm_pk
+  ),
+  nonce: 24_bytes_of_zeros,
+  key: sha256(
+    concat(
+      network_identifier,
+      shared_secret_ab,
+      shared_secret_aB
+    )
+  )
+)
+#+END_SRC
+
+Server verifies
+
+#+BEGIN_SRC 
+msg3_plaintext = assert_nacl_secretbox_open(
+  ciphertext: msg3,
+  nonce: 24_bytes_of_zeros,
+  key: sha256(
+    concat(
+      network_identifier,
+      shared_secret_ab,
+      shared_secret_aB
+    )
+  )
+)
+
+assert(length(msg3_plaintext) == 96)
+
+detached_signature_A = first_64_bytes(msg3_plaintext)
+client_longterm_pk = last_32_bytes(msg3_plaintext)
+
+assert_nacl_sign_verify_detached(
+  sig: detached_signature_A,
+  msg: concat(
+    network_identifier,
+    server_longterm_pk,
+    sha256(shared_secret_ab)
+  ),
+  key: client_longterm_pk
+)
+#+END_SRC
+
+
+#+BEGIN_QUOTE
+*Detached signatures* do not contain a copy of the message that was signed, only
+a tag that allows verifying the signature if you already know the message.
+
+Here it is okay because the server knows all the information needed to
+reconstruct the message that the client signed.
+#+END_QUOTE
+
+The client reveals their identity to the server by sending their long term
+public key =A=. The client also makes a signature using their long term secret key =A=.
+By signing the keys used earlier in the handshake the client proves their
+identity and confirms that they do indeed wish to be part of this handshake.
+
+The client’s message is enclosed in a secret box to ensure that only the server
+can read it. Upon receiving it, the server opens the box, stores the client’s
+long term public key and verifies the signature.
+
+An all-zero nonce is used for the secret box. The secret box construction
+requires that all secret boxes using a particular key must use different nonces.
+It’s important to get this detail right because reusing a nonce will allow an
+attacker to recover the key and encrypt or decrypt any secret boxes using that
+key. Using a zero nonce is allowed here because this is the only secret box that
+ever uses the key sha256(concat(=N= , =a*b=, =a*B=)).
+
+*** Shared secret derivation
+
+Client computes
+
+#+BEGIN_SRC 
+shared_secret_Ab = nacl_scalarmult(
+  sk_to_curve25519(client_longterm_sk),
+  server_ephemeral_pk
+)
+#+END_SRC
+
+Server computes
+
+#+BEGIN_SRC 
+shared_secret_Ab = nacl_scalarmult(
+  server_ephemeral_sk,
+  pk_to_curve25519(client_longterm_pk)
+)
+#+END_SRC
+
+Now that the server knows the client’s long term public key =A=, another shared
+secret =A*b= is derived by both ends. The server uses this shared secret to send a
+message that only the real client can read and not a man-in-the-middle.
+
+*** 4. Server accept
+
+Server computes
+
+#+BEGIN_SRC 
+detached_signature_B = nacl_sign_detatched(
+  msg: concat(
+    network_identifier,
+    detached_signature_A,
+    client_longterm_pk,
+    sha256(shared_secret_ab)
+  ),
+  key: server_longterm_sk
+)
+#+END_SRC
+
+then sends (80 bytes)
+
+#+BEGIN_SRC 
+nacl_secret_box(
+  msg: detached_signature_B,
+  nonce: 24_bytes_of_zeros,
+  key: sha256(
+    concat(
+      network_identifier,
+      shared_secret_ab,
+      shared_secret_aB,
+      shared_secret_Ab
+    )
+  )
+)
+
+#+END_SRC
+
+Client verifies
+
+#+BEGIN_SRC 
+detached_signature_B = assert_nacl_secretbox_open(
+  ciphertext: msg4,
+  nonce: 24_bytes_of_zeros,
+  key: sha256(
+    concat(
+      network_identifier,
+      shared_secret_ab,
+      shared_secret_aB,
+      shared_secret_Ab
+    )
+  )
+)
+
+assert_nacl_sign_verify_detached(
+  sig: detached_signature_B,
+  msg: concat(
+    network_identifier,
+    detached_signature_A,
+    client_longterm_pk,
+    sha256(shared_secret_ab)
+  ),
+  key: server_longterm_pk
+)
+#+END_SRC
+
+The server accepts the handshake by signing a message using their long term
+secret key =B=. It includes a copy of the client’s previous signature. The server’s
+signature is enclosed in a secret box using all of the shared secrets.
+
+Upon receiving it, the client opens the box and verifies the server’s signature.
+
+Similarly to the previous message, this secret box also uses an all-zero nonce
+because it is the only secret box that ever uses the key sha256(concat(=N= , =a*b=, =a*B=, =A*b=)).
+
+*** Handshake complete
+
+Shared secret: =N= =a*b= =a*B= =A*b=.
+
+At this point the handshake has succeeded. The client and server have proven
+their identities to each other.
+
+The shared secrets established during the handshake are used to set up a pair of box streams for securely exchanging further messages.
+
+
+** Box  stream
+Box stream is the bulk encryption protocol used to exchange messages following
+the handshake until the connection ends. It is designed to protect messages from
+being read or modified by a man-in-the-middle.
+
+Each message in a box stream has a header and body. The header is always 34
+bytes long and says how long the body will be.
+
+[[./figures/box_stream_overview.svg]]
+
+*** Sending
+
+Sending a message involves encrypting the body of the message and preparing a
+header for it. Two secret boxes are used; one to protect the header and another
+to protect the body.
+
+[[./figures/box_stream_send.svg]]
+
+*** Receiving
+
+Receiving a message involves reading the header to find out how long the body is
+then reassembling and opening the body secret box.
+
+[[./figures/box_stream_receive.svg]]
+
+*** Goodbye
+
+The stream ends with a special “goodbye” header. Because the goodbye header is
+authenticated it allows a receiver to tell the difference between the connection
+genuinely being finished and a man-in-the-middle forcibly resetting the
+underlying TCP connection.
+
+[[./figures/box_stream_goodbye.svg]]
+
+When a receiver opens a header and finds that it contains all zeros then they will know that the connection is finished.
+
+*** Keys and nonces
+
+Two box streams are used at the same time when Scuttlebutt peers communicate.
+One is for client-to-server messages and the other is for server-to-client
+messages. The two streams use different keys and starting nonces for their
+secret boxes.
+
+[[./figures/box_stream_params.svg]]
+
+The starting nonce is used for the first header in the stream (“secret box 1” in
+the above figures), then incremented for the first body (“secret box 2”), then
+incremented for the next header and so on.
+
+
+** RPC protocol
+
+Scuttlebutt peers make requests to each other using an RPC protocol. Typical
+requests include asking for the latest messages in a particular feed or
+requesting a blob.
+
+The RPC protocol can interleave multiple requests so that a slow request doesn’t
+block following ones. It also handles long-running asynchronous requests for
+notifying when an event occurs and streams that deliver multiple responses over
+time.
+
+Similar to the box stream protocol, the RPC protocol consists of fixed-length
+headers followed by variable-length bodies. There is also a goodbye message
+which is just a zeroed out header.
+
+[[./figures/rpc_overview.svg]]
+
+#+BEGIN_QUOTE
+*Remote procedure calls* are where a computer exposes a set of procedures that
+another computer can call over the network.
+
+The requester tells the responder the name of the procedure they wish to call
+along with any arguments. The responder performs the action and returns a value
+back to the requester.
+#+END_QUOTE
+
+Both peers make requests to each other at the same time using the pair of box
+streams that have been established. The box streams protect the RPC protocol
+from eavesdropping and tampering.
+
+[[./figures/rpc_alignment.svg]]
+
+*** Header structure
+
+RPC headers contain a set of flags to say what type of message it is, a field
+specifying its length and a request number which allows matching requests with
+their responses when there are several active at the same time.
+
+[[./figures/rpc_header.svg]]
+
+*** Request format
+To make an RPC request, send a JSON message containing the name of the procedure
+you wish to call, the type of procedure and any arguments.
+
+The name is a list of strings. For a top-level procedure like
+createHistoryStream the list only has one element: =["createHistoryStream"]=.
+Procedures relating to blobs are grouped in the blobs namespace, for example to
+use /blobs.get/ send the list: =["blobs", "get"]=.
+
+There are two types of procedure used when Scuttlebutt peers talk to each other:
+
+- Source procedures return multiple responses over time and are used for
+  streaming data or continually notifying when new events occur. When making one
+  of these requests, the stream flag in the RPC header must be set.
+- Async procedures return a single response. Async responses can arrive quickly
+  or arrive much later in response to a one-off event.
+
+For each procedure in the RPC protocol you must already know whether it is
+source or async and correctly specify this in the request body.
+
+*** Source example
+
+This RPC message shows an example of a createHistoryStream request:
+
+| Request number | 1    |
+| Body type      | JSON |
+| Stream         | Yes  |
+| End/err        | No   |
+
+#+BEGIN_SRC 
+{
+  "name": ["createHistoryStream"],
+  "type": "source",
+  "args": [{"id": "@FCX/tsDLpubCPKKfIrw4gc+SQkHcaD17s7GI6i/ziWY=.ed25519"}]
+}
+#+END_SRC
+
+#+BEGIN_QUOTE
+JSON messages don’t have indentation or whitespace when sent over the wire.
+#+END_QUOTE
+
+
+/createHistoryStream/ is how Scuttlebutt peers ask each other for a list of
+messages posted by a particular feed. It has one argument that is a JSON
+dictionary specifying more options about the request. id is the only required
+option and says which feed you are interested in.
+
+Because this is the first RPC request, the request number is 1. The next request
+made by this peer will be numbered 2. The other peer will also use request
+number 1 for their first request, but the peers can tell these apart because
+they know whether they sent or received each request.
+
+Now the responder begins streaming back responses:
+
+| Request number | -1  |
+| Body type      | JSON |
+| Stream         | Yes  |
+| End/err        | No   |
+
+#+BEGIN_SRC 
+{
+  "key": "%XphMUkWQtomKjXQvFGfsGYpt69sgEY7Y4Vou9cEuJho=.sha256",
+  "value": {
+    "previous": null,
+    "author": "@FCX/tsDLpubCPKKfIrw4gc+SQkHcaD17s7GI6i/ziWY=.ed25519",
+    "sequence": 1,
+    "timestamp": 1514517067954,
+    "hash": "sha256",
+    "content": {
+      "type": "post",
+      "text": "This is the first post!"
+    },
+    "signature": "QYOR/zU9dxE1aKBaxc3C0DJ4gRyZtlMfPLt+CGJcY73sv5abKK
+                  Kxr1SqhOvnm8TY784VHE8kZHCD8RdzFl1tBA==.sig.ed25519"
+  },
+  "timestamp": 1514517067956
+}
+#+END_SRC
+
+
+| Request number | -1  |
+| Body type      | JSON |
+| Stream         | Yes  |
+| End/err        | No   |
+
+
+#+BEGIN_SRC 
+{
+  "key": "%R7lJEkz27lNijPhYNDzYoPjM0Fp+bFWzwX0SmNJB/ZE=.sha256",
+  "value": {
+    "previous": "%XphMUkWQtomKjXQvFGfsGYpt69sgEY7Y4Vou9cEuJho=.sha256",
+    "author": "@FCX/tsDLpubCPKKfIrw4gc+SQkHcaD17s7GI6i/ziWY=.ed25519",
+    "sequence": 2,
+    "timestamp": 1514517078157,
+    "hash": "sha256",
+    "content": {
+      "type": "post",
+      "text": "Second post!"
+    },
+    "signature": "z7W1ERg9UYZjNfE72ZwEuJF79khG+eOHWFp6iF+KLuSrw8Lqa6
+                  IousK4cCn9T5qFa8E14GVek4cAMmMbjqDnAg==.sig.ed25519"
+  },
+  "timestamp": 1514517078160
+}
+#+END_SRC
+
+Each message posted by the feed is sent back in its own response. This feed only
+contains two messages. To signal the end of the stream, the responder sends an
+RPC message with both the stream and end/err flags set and a JSON body of
+=true=.
+
+Alternatively, to cancel a stream early the requester can send another request
+using the same request number, with the stream and end/err flags both set and a
+JSON body of =true=.
+
+*** TODO Async example
+
+* Feeds
+
+** Structure
+
+** Message format
+
+** createHistoryStream
+
+* Blobs
+
+** Fetching
+
+** Want and have
+
+* Following
+
+** Follow graph
+
+* Pubs
+
+** Invites
+#+custom_id: invites
+
+*** Redeeming invites
+
+* Private messages
+
+** Encrypting
+
+** Decrypting
